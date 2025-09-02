@@ -1,0 +1,24 @@
+{
+  "items": [
+    {
+      "name": "HelloKindle",
+      "priority": 0,
+      "items": [
+        {
+          "name": "Hello World Test",
+          "priority": 1,
+          "action": "/mnt/us/hellokindle/safe-test.sh",
+          "params": "--kual",
+          "exitmenu": false
+        },
+        {
+          "name": "Debug Info",
+          "priority": 2,
+          "action": "/mnt/us/hellokindle/debug-info.sh",
+          "params": "--kual",
+          "exitmenu": false
+        }
+      ]
+    }
+  ]
+}
