@@ -137,11 +137,29 @@ impl BoardWidget {
         self.last_move_squares = squares;
     }
 
+    /// Programmatically set (or clear, with `None`) the selected-square
+    /// highlight. Taps manage the selection themselves; this is for callers
+    /// that mark a square without a tap — the puzzle hint button uses it to
+    /// flag the piece that should move next. The square is in true board
+    /// coordinates, the same as `handle_touch` produces.
+    pub fn select_square(&mut self, square: Option<Square>) {
+        self.selected_square = square;
+    }
+
     pub fn set_flipped(&mut self, flipped: bool) {
         if self.flipped != flipped {
             self.flipped = flipped;
             self.force_full_repaint = true;
         }
+    }
+
+    /// Force the next `render` to fully repaint instead of diffing against the
+    /// last-drawn position. Required whenever something outside the widget has
+    /// drawn over the board area (e.g. another screen was shown on top), since
+    /// the partial-render path assumes the framebuffer still holds what it
+    /// last painted.
+    pub fn invalidate(&mut self) {
+        self.force_full_repaint = true;
     }
 
     pub fn handle_touch(&mut self, touch: &TouchEvent) -> Option<AppEvent> {

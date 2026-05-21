@@ -9,6 +9,7 @@ use crate::models::{
     board_api::{GameDataList, PlayedBy, Turn},
     chess::ChessApp,
     oauth::{LichessUser, TokenInfo},
+    puzzle::{Puzzle, PuzzleParams},
 };
 
 #[derive(Debug, Clone)]
@@ -58,6 +59,23 @@ pub enum AppEvent {
         last_move: u64,
     },
 
+    // Puzzle flow → PuzzleScreen / PuzzleSettingsScreen.
+    // - PuzzleLoaded: a daily/next puzzle was fetched and parsed.
+    // - PuzzleLoadFailed: the fetch or parse errored.
+    // - OpenPuzzleSettings / NextPuzzle / ShowPuzzleHint: emitted by the puzzle
+    //   sidebar buttons.
+    // - ApplyPuzzleParams: re-emitted by the settings screen on its way out,
+    //   carrying the chosen params back to PuzzleScreen to drive a /next fetch.
+    PuzzleLoaded(Puzzle),
+    PuzzleLoadFailed(String),
+    OpenPuzzleSettings,
+    NextPuzzle,
+    ShowPuzzleHint,
+    // The opponent's scripted reply, delivered ~1 s after a correct move so it
+    // doesn't snap in instantly (posted by a delayed task — see PuzzleScreen).
+    PuzzleOpponentMove,
+    ApplyPuzzleParams(PuzzleParams),
+
     // UI Events
     Touch(TouchEvent),
     Redraw,
@@ -66,10 +84,14 @@ pub enum AppEvent {
     // Chess Events
     MoveMade(ChessMove),
     SquareSelected(Square),
+    // The server rejected the last move (illegal — e.g. leaves the king in
+    // check). Posted by the move-submission task back to ChessGameScreen.
+    MoveRejected,
 
     // Navigation
-    ShowMenu,
     ExitToMenu,
+    // Open the live-game actions screen (resign / abort).
+    OpenGameActions,
     ChessReady(ChessApp),
     Quit,
 

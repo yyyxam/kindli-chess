@@ -139,6 +139,9 @@ impl App {
                         break;
                     }
                     if let Some(screen) = self.screen_stack.last_mut() {
+                        // The revealed screen was drawn over while covered —
+                        // let it invalidate cached render state / refresh.
+                        screen.on_reveal();
                         if let Err(e) = screen.render(&mut self.display) {
                             error!("Render error after pop: {}", e);
                         }

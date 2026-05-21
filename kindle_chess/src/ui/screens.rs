@@ -4,20 +4,24 @@ use log::{debug, info, warn};
 
 use crate::{
     api::{
-        github::{check_for_update, UpdateInfo},
+        api::{get_home_puzzle, get_next_puzzle},
+        github::{UpdateInfo, check_for_update},
         oauth::{authenticate, get_user_info, load_token},
         update::apply_update,
     },
     models::{
         board_api::PlayedBy,
         chess::ChessApp,
+        oauth::TokenInfo,
+        puzzle::{PuzzleParams, PuzzleSession},
         ui::{
-            ChessAuthScreen, ChessGameScreen, Display, HomeScreen, OngoingChessGamesScreen, Screen,
-            SettingsScreen, Transition, UpdateScreen, UpdateState,
+            ChessAuthScreen, ChessGameScreen, Display, GameActionsScreen, HomeScreen,
+            OngoingChessGamesScreen, PuzzleScreen, PuzzleSettingsScreen, Screen, SettingsScreen,
+            Transition, UpdateScreen, UpdateState,
         },
     },
     ui::{
-        events::{AppEvent, RectangleExt, TouchKind},
+        events::{AppEvent, RectangleExt, Square, TouchKind},
         renderer::DrawColor,
         widgets::Button,
     },
@@ -38,7 +42,22 @@ impl Screen for HomeScreen {
         }
 
         display.renderer.clear(DrawColor::White)?;
+
+        // Logo, centred in the upper third. It was pre-scaled to its display
+        // size in HomeScreen::new, so draw it at its own dimensions.
+        if let Some(logo) = &self.logo {
+            let dw = logo.width() as u16;
+            let dh = logo.height() as u16;
+            let upper_half = 1448 / 2;
+            let lx = (1072 - dw as i16) / 2;
+            let ly = (upper_half - dh as i16) / 2;
+            display
+                .renderer
+                .draw_image_alpha(lx, ly, dw, dh, logo, DrawColor::White)?;
+        }
+
         self.chess_button.draw(&mut display.renderer)?;
+        self.puzzle_button.draw(&mut display.renderer)?;
         self.ongoing_games_button.draw(&mut display.renderer)?;
         self.settings_button.draw(&mut display.renderer)?;
 
@@ -76,6 +95,15 @@ impl Screen for HomeScreen {
                         return Ok(Transition::Push(Box::new(SettingsScreen::new())));
                     }
 
+                    // Puzzle is also auth-independent: the daily puzzle needs
+                    // no token. A token, if present, is forwarded so the
+                    // settings screen can make tailored /puzzle/next requests.
+                    if self.puzzle_button.rect.contains(touch.x, touch.y) {
+                        info!("Puzzle button pressed");
+                        let token = self.app.as_ref().and_then(|a| a.token());
+                        return Ok(Transition::Push(Box::new(PuzzleScreen::new(token))));
+                    }
+
                     let Some(app) = self.app.clone() else {
                         info!("Button tap ignored — auth not yet complete");
                         return Ok(Transition::Stay);
@@ -91,7 +119,9 @@ impl Screen for HomeScreen {
                     }
                 }
 
-                Ok(Transition::Redraw)
+                // A tap that hit no button changes nothing — staying put
+                // avoids a full-screen clear+repaint (an e-ink flash).
+                Ok(Transition::Stay)
             }
 
             AppEvent::Expose => {
@@ -184,6 +214,13 @@ impl Screen for ChessGameScreen {
                 board,
                 last_move,
             } => {
+                // The opponent is whichever colour the local player isn't.
+                let opponent = if player0_white {
+                    black.display_name()
+                } else {
+                    white.display_name()
+                };
+                self.sidebar.set_opponent(opponent);
                 self.app
                     .apply_game_full(white, black, player0_white, turn.clone());
                 // Orient the board so the local player's pieces are on the
@@ -232,9 +269,13 @@ impl Screen for ChessGameScreen {
                     return Ok(Transition::Redraw);
                 };
                 if let Some(api) = self.app.online_in_game_api() {
+                    // On a rejected move (illegal — e.g. doesn't resolve a
+                    // check) post MoveRejected so the sidebar can flag it.
+                    let tx = display.event_tx.clone();
                     tokio::spawn(async move {
                         if let Err(e) = api.move_piece(&uci).await {
                             warn!("move_piece({}) failed: {}", uci, e);
+                            let _ = tx.send(AppEvent::MoveRejected);
                         }
                     });
                 } else {
@@ -243,14 +284,15 @@ impl Screen for ChessGameScreen {
                 Ok(Transition::Redraw)
             }
 
-            AppEvent::SquareSelected(square) => {
-                info!("Selected square: {}", square.to_algebraic());
+            AppEvent::MoveRejected => {
+                info!("Move rejected by server — flagging sidebar");
+                self.sidebar.set_move_rejected();
                 Ok(Transition::Redraw)
             }
 
-            AppEvent::ShowMenu => {
-                info!("Menu requested — returning to home screen");
-                Ok(Transition::Pop)
+            AppEvent::SquareSelected(square) => {
+                info!("Selected square: {}", square.to_algebraic());
+                Ok(Transition::Redraw)
             }
 
             AppEvent::ExitToMenu => {
@@ -258,8 +300,17 @@ impl Screen for ChessGameScreen {
                 Ok(Transition::Pop)
             }
 
+            AppEvent::OpenGameActions => {
+                info!("Opening game-actions screen");
+                Ok(Transition::Push(Box::new(GameActionsScreen::new(
+                    self.app.clone(),
+                ))))
+            }
+
             AppEvent::Expose => {
                 debug!("Expose event - redrawing");
+                self.board.invalidate();
+                self.sidebar.invalidate();
                 Ok(Transition::Redraw)
             }
 
@@ -275,6 +326,13 @@ impl Screen for ChessGameScreen {
 
             _ => Ok(Transition::Stay),
         }
+    }
+
+    fn on_reveal(&mut self) {
+        // A sub-screen (game actions) drew over the board + sidebar while we
+        // were covered — force a full repaint instead of a stale partial diff.
+        self.board.invalidate();
+        self.sidebar.invalidate();
     }
 }
 
@@ -601,6 +659,13 @@ impl Screen for OngoingChessGamesScreen {
             _ => Ok(Transition::Stay),
         }
     }
+
+    fn on_reveal(&mut self) {
+        // Returning from a game (or any pushed screen): drop the cached list
+        // so the next render re-fetches and the ongoing-games view is current.
+        self.games = None;
+        self.error = None;
+    }
 }
 
 // ─── SettingsScreen ───────────────────────────────────────────────────────────
@@ -613,9 +678,13 @@ impl Screen for SettingsScreen {
         let title = "Settings";
         let title_size = 56.0;
         let (tw, _) = display.renderer.measure_text(title, title_size);
-        display
-            .renderer
-            .draw_text((1072 - tw as i16) / 2, 120, title, title_size, DrawColor::Black)?;
+        display.renderer.draw_text(
+            (1072 - tw as i16) / 2,
+            120,
+            title,
+            title_size,
+            DrawColor::Black,
+        )?;
 
         // Version block
         let info_size = 28.0;
@@ -684,18 +753,18 @@ impl Screen for UpdateScreen {
         let title = "Update";
         let title_size = 56.0;
         let (tw, _) = display.renderer.measure_text(title, title_size);
-        display
-            .renderer
-            .draw_text((1072 - tw as i16) / 2, 120, title, title_size, DrawColor::Black)?;
+        display.renderer.draw_text(
+            (1072 - tw as i16) / 2,
+            120,
+            title,
+            title_size,
+            DrawColor::Black,
+        )?;
 
         // State-driven body. The action button is only drawn (and only live in
         // the touch handler) when there is something meaningful to do.
         let (lines, action_label, action_visible) = match &self.state {
-            UpdateState::Checking => (
-                vec!["Checking for updates…".to_string()],
-                "Apply",
-                false,
-            ),
+            UpdateState::Checking => (vec!["Checking for updates…".to_string()], "Apply", false),
             UpdateState::UpToDate => (
                 vec![format!("You're up to date — v{}", version::VERSION)],
                 "Apply",
@@ -848,4 +917,407 @@ fn kick_update_apply(info: UpdateInfo, tx: Sender<AppEvent>) {
             }
         }
     });
+}
+
+// ─── PuzzleScreen ─────────────────────────────────────────────────────────────
+
+impl Screen for PuzzleScreen {
+    fn render(&mut self, display: &mut Display) -> Result<(), Box<dyn std::error::Error>> {
+        // First paint after Push: fetch the opening puzzle — the daily one,
+        // unless the signed-in account already played today's daily, in which
+        // case a fresh puzzle is fetched instead. Result comes back as
+        // PuzzleLoaded / PuzzleLoadFailed (see kick_home_puzzle).
+        if !self.load_started {
+            self.load_started = true;
+            kick_home_puzzle(self.token.clone(), self.params, display.event_tx.clone());
+        }
+
+        self.board.render(&mut display.renderer)?;
+        self.sidebar.render(&mut display.renderer)?;
+        display.renderer.present()?;
+        Ok(())
+    }
+
+    fn handle_event(
+        &mut self,
+        event: AppEvent,
+        display: &mut Display,
+    ) -> Result<Transition, Box<dyn std::error::Error>> {
+        match event {
+            // A puzzle (daily or next) arrived — rebuild the session and reset
+            // the board to its starting position.
+            AppEvent::PuzzleLoaded(puzzle) => match PuzzleSession::new(puzzle) {
+                Ok(session) => {
+                    info!(
+                        "Puzzle loaded (rating {}, {} solution plies)",
+                        session.rating,
+                        session.solution.len()
+                    );
+                    // Orient the board so the solver's pieces are on the bottom
+                    // rank — flip when the solver plays Black.
+                    self.board.set_flipped(!session.solver_white);
+                    self.board.set_position(session.position.clone());
+                    self.board.set_last_move(session.last_move_mask);
+                    // Drop any hint highlight carried over from a prior puzzle.
+                    self.board.select_square(None);
+                    self.sidebar
+                        .set_puzzle_info(session.rating, &session.themes);
+                    self.sidebar.set_status(&session.status);
+                    self.session = Some(session);
+                    Ok(Transition::Redraw)
+                }
+                Err(e) => {
+                    warn!("Puzzle FEN rejected: {}", e);
+                    self.sidebar.set_message("Could not load puzzle");
+                    Ok(Transition::Redraw)
+                }
+            },
+
+            AppEvent::PuzzleLoadFailed(e) => {
+                warn!("Puzzle fetch failed: {}", e);
+                self.sidebar.set_message("Could not load puzzle");
+                Ok(Transition::Redraw)
+            }
+
+            AppEvent::Touch(touch) => {
+                if let Some(ev) = self.board.handle_touch(&touch) {
+                    return self.handle_event(ev, display);
+                }
+                if let Some(ev) = self.sidebar.handle_touch(&touch) {
+                    return self.handle_event(ev, display);
+                }
+                Ok(Transition::Redraw)
+            }
+
+            // The solver attempted a move — validate it against the solution.
+            AppEvent::MoveMade(chess_move) => {
+                let Some(session) = self.session.as_mut() else {
+                    return Ok(Transition::Redraw);
+                };
+                if !session.accepts_input() {
+                    return Ok(Transition::Redraw);
+                }
+                let Some(uci) = self.board.move_to_uci(chess_move) else {
+                    warn!("MoveMade before puzzle position loaded — dropping move");
+                    return Ok(Transition::Redraw);
+                };
+                let status = session.try_move(&uci);
+                info!("Puzzle move {} → {:?}", uci, status);
+                // try_move applies only the solver's move on success and leaves
+                // the position untouched on a wrong move, so re-syncing the
+                // widget unconditionally is correct either way.
+                self.board.set_position(session.position.clone());
+                self.board.set_last_move(session.last_move_mask);
+                self.sidebar.set_status(&status);
+                // On a correct, non-final move the opponent's scripted reply is
+                // held back ~1 s so the solver sees their own move land first
+                // instead of both moves snapping in at once.
+                if session.opponent_reply_pending() {
+                    let tx = display.event_tx.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                        let _ = tx.send(AppEvent::PuzzleOpponentMove);
+                    });
+                }
+                Ok(Transition::Redraw)
+            }
+
+            // The opponent's scripted reply, fired ~1 s after a correct move.
+            AppEvent::PuzzleOpponentMove => {
+                let Some(session) = self.session.as_mut() else {
+                    return Ok(Transition::Stay);
+                };
+                // The puzzle may have been replaced (Next puzzle / settings)
+                // during the delay — only apply the reply if still pending.
+                if !session.opponent_reply_pending() {
+                    return Ok(Transition::Stay);
+                }
+                let status = session.apply_opponent_reply();
+                info!("Puzzle opponent reply → {:?}", status);
+                self.board.set_position(session.position.clone());
+                self.board.set_last_move(session.last_move_mask);
+                self.sidebar.set_status(&status);
+                Ok(Transition::Redraw)
+            }
+
+            AppEvent::SquareSelected(square) => {
+                info!("Puzzle square selected: {}", square.to_algebraic());
+                Ok(Transition::Redraw)
+            }
+
+            // Hint button — mark the from-square of the next solution move so
+            // the solver can see which piece to move.
+            AppEvent::ShowPuzzleHint => {
+                let from = self
+                    .session
+                    .as_ref()
+                    .and_then(|s| s.next_expected_move())
+                    .and_then(square_from_uci);
+                match from {
+                    Some(square) => {
+                        info!("Puzzle hint: marking {}", square.to_algebraic());
+                        self.board.select_square(Some(square));
+                    }
+                    None => info!("Puzzle hint requested with no move to hint"),
+                }
+                Ok(Transition::Redraw)
+            }
+
+            AppEvent::OpenPuzzleSettings => Ok(Transition::Push(Box::new(
+                PuzzleSettingsScreen::new(self.params),
+            ))),
+
+            // The sidebar's "Next puzzle" button — refetch with current params.
+            AppEvent::NextPuzzle => {
+                self.sidebar.set_message("Loading…");
+                kick_next_puzzle(self.token.clone(), self.params, display.event_tx.clone());
+                Ok(Transition::Redraw)
+            }
+
+            // Re-emitted by PuzzleSettingsScreen as it pops — adopt the chosen
+            // params and fetch a puzzle with them.
+            AppEvent::ApplyPuzzleParams(params) => {
+                self.params = params;
+                self.sidebar.set_message("Loading…");
+                kick_next_puzzle(self.token.clone(), self.params, display.event_tx.clone());
+                Ok(Transition::Redraw)
+            }
+
+            AppEvent::ExitToMenu => Ok(Transition::Pop),
+
+            AppEvent::Expose => {
+                self.board.invalidate();
+                self.sidebar.invalidate();
+                Ok(Transition::Redraw)
+            }
+
+            AppEvent::WindowUnmapped => {
+                warn!("Window unmapped!");
+                Ok(Transition::Stay)
+            }
+
+            AppEvent::Quit => Ok(Transition::Quit),
+
+            _ => Ok(Transition::Stay),
+        }
+    }
+
+    fn on_reveal(&mut self) {
+        // The settings screen drew over the board + sidebar while we were
+        // covered — force a full repaint instead of a stale partial diff.
+        self.board.invalidate();
+        self.sidebar.invalidate();
+    }
+}
+
+// Parse the from-square (the first two characters) of a UCI move into a board
+// Square. Returns None if the string is too short or out of the a1–h8 range.
+fn square_from_uci(uci: &str) -> Option<Square> {
+    let b = uci.as_bytes();
+    if b.len() < 2 {
+        return None;
+    }
+    let file = b[0].checked_sub(b'a').filter(|&f| f < 8)?;
+    let rank = b[1].checked_sub(b'1').filter(|&r| r < 8)?;
+    Some(Square::new(file, rank))
+}
+
+// Fetch the home-screen puzzle: the daily puzzle, or a fresh one when the
+// account has already played today's daily (see get_home_puzzle). Result
+// delivered as PuzzleLoaded / PuzzleLoadFailed over the shared event channel.
+fn kick_home_puzzle(token: Option<TokenInfo>, params: PuzzleParams, tx: Sender<AppEvent>) {
+    tokio::spawn(async move {
+        match get_home_puzzle(token, params).await {
+            Ok(puzzle) => {
+                let _ = tx.send(AppEvent::PuzzleLoaded(puzzle));
+            }
+            Err(e) => {
+                let _ = tx.send(AppEvent::PuzzleLoadFailed(e.to_string()));
+            }
+        }
+    });
+}
+
+// Fetch a /puzzle/next puzzle for `params`, optionally authenticated.
+fn kick_next_puzzle(token: Option<TokenInfo>, params: PuzzleParams, tx: Sender<AppEvent>) {
+    tokio::spawn(async move {
+        match get_next_puzzle(token, params).await {
+            Ok(puzzle) => {
+                let _ = tx.send(AppEvent::PuzzleLoaded(puzzle));
+            }
+            Err(e) => {
+                let _ = tx.send(AppEvent::PuzzleLoadFailed(e.to_string()));
+            }
+        }
+    });
+}
+
+// ─── PuzzleSettingsScreen ─────────────────────────────────────────────────────
+
+impl Screen for PuzzleSettingsScreen {
+    fn render(&mut self, display: &mut Display) -> Result<(), Box<dyn std::error::Error>> {
+        display.renderer.clear(DrawColor::White)?;
+
+        let title = "Puzzle Settings";
+        let title_size = 56.0;
+        let (tw, _) = display.renderer.measure_text(title, title_size);
+        display.renderer.draw_text(
+            (1072 - tw as i16) / 2,
+            150,
+            title,
+            title_size,
+            DrawColor::Black,
+        )?;
+
+        self.difficulty_button.draw(&mut display.renderer)?;
+        self.phase_button.draw(&mut display.renderer)?;
+        self.color_button.draw(&mut display.renderer)?;
+        self.fetch_button.draw(&mut display.renderer)?;
+        self.back_button.draw(&mut display.renderer)?;
+
+        display.renderer.present()?;
+        Ok(())
+    }
+
+    fn handle_event(
+        &mut self,
+        event: AppEvent,
+        display: &mut Display,
+    ) -> Result<Transition, Box<dyn std::error::Error>> {
+        match event {
+            AppEvent::Touch(touch) => {
+                if touch.kind != TouchKind::Up {
+                    return Ok(Transition::Stay);
+                }
+
+                // Tap-to-cycle option buttons.
+                if self.difficulty_button.rect.contains(touch.x, touch.y) {
+                    self.params.difficulty = self.params.difficulty.next();
+                    self.difficulty_button.label =
+                        format!("Difficulty: {}", self.params.difficulty.label());
+                    return Ok(Transition::Redraw);
+                }
+                if self.phase_button.rect.contains(touch.x, touch.y) {
+                    self.params.phase = self.params.phase.next();
+                    self.phase_button.label = format!("Phase: {}", self.params.phase.label());
+                    return Ok(Transition::Redraw);
+                }
+                if self.color_button.rect.contains(touch.x, touch.y) {
+                    self.params.color = self.params.color.next();
+                    self.color_button.label = format!("Color: {}", self.params.color.label());
+                    return Ok(Transition::Redraw);
+                }
+
+                // Hand the chosen params back to PuzzleScreen (top of stack
+                // once we pop) and let it drive the fetch.
+                if self.fetch_button.rect.contains(touch.x, touch.y) {
+                    info!("Fetching puzzle with {:?}", self.params);
+                    let _ = display
+                        .event_tx
+                        .send(AppEvent::ApplyPuzzleParams(self.params));
+                    return Ok(Transition::Pop);
+                }
+                if self.back_button.rect.contains(touch.x, touch.y) {
+                    return Ok(Transition::Pop);
+                }
+                Ok(Transition::Stay)
+            }
+
+            AppEvent::Expose => Ok(Transition::Redraw),
+
+            AppEvent::WindowUnmapped => {
+                warn!("Window unmapped!");
+                Ok(Transition::Stay)
+            }
+
+            AppEvent::Quit => Ok(Transition::Quit),
+
+            _ => Ok(Transition::Stay),
+        }
+    }
+}
+
+// ─── GameActionsScreen ────────────────────────────────────────────────────────
+
+impl Screen for GameActionsScreen {
+    fn render(&mut self, display: &mut Display) -> Result<(), Box<dyn std::error::Error>> {
+        display.renderer.clear(DrawColor::White)?;
+
+        let title = "Game Actions";
+        let title_size = 56.0;
+        let (tw, _) = display.renderer.measure_text(title, title_size);
+        display.renderer.draw_text(
+            (1072 - tw as i16) / 2,
+            160,
+            title,
+            title_size,
+            DrawColor::Black,
+        )?;
+
+        self.resign_button.draw(&mut display.renderer)?;
+        self.abort_button.draw(&mut display.renderer)?;
+        self.back_button.draw(&mut display.renderer)?;
+
+        display.renderer.present()?;
+        Ok(())
+    }
+
+    fn handle_event(
+        &mut self,
+        event: AppEvent,
+        _display: &mut Display,
+    ) -> Result<Transition, Box<dyn std::error::Error>> {
+        match event {
+            AppEvent::Touch(touch) => {
+                if touch.kind != TouchKind::Up {
+                    return Ok(Transition::Stay);
+                }
+
+                // Resign / abort fire-and-forget — the game-state stream still
+                // running on ChessGameScreen picks up the terminal state and
+                // flips the sidebar to "game over" once we pop back to it.
+                if self.resign_button.rect.contains(touch.x, touch.y) {
+                    if let Some(api) = self.app.online_in_game_api() {
+                        info!("Resigning game");
+                        tokio::spawn(async move {
+                            if let Err(e) = api.resign_game().await {
+                                warn!("resign_game failed: {}", e);
+                            }
+                        });
+                    } else {
+                        warn!("Resign with no in-game backend — ignored");
+                    }
+                    return Ok(Transition::Pop);
+                }
+                if self.abort_button.rect.contains(touch.x, touch.y) {
+                    if let Some(api) = self.app.online_in_game_api() {
+                        info!("Aborting game");
+                        tokio::spawn(async move {
+                            if let Err(e) = api.abort_game().await {
+                                warn!("abort_game failed: {}", e);
+                            }
+                        });
+                    } else {
+                        warn!("Abort with no in-game backend — ignored");
+                    }
+                    return Ok(Transition::Pop);
+                }
+                if self.back_button.rect.contains(touch.x, touch.y) {
+                    return Ok(Transition::Pop);
+                }
+                Ok(Transition::Stay)
+            }
+
+            AppEvent::Expose => Ok(Transition::Redraw),
+
+            AppEvent::WindowUnmapped => {
+                warn!("Window unmapped!");
+                Ok(Transition::Stay)
+            }
+
+            AppEvent::Quit => Ok(Transition::Quit),
+
+            _ => Ok(Transition::Stay),
+        }
+    }
 }
