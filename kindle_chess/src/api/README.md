@@ -115,7 +115,7 @@ these futures get `tokio::spawn`ed.
 Constants in `github.rs` are the **contract with `.github/workflows/release.yml`**:
 
 ```rust
-pub const OWNER: &str = "yyyxam";
+pub const OWNER: &str = "mxyyz";
 pub const REPO:  &str = "kindle-chess";
 pub const ASSET_NAME: &str = "kindle-chess-armv7-musl";
 pub const SHA_NAME:   &str = "kindle-chess-armv7-musl.sha256";
@@ -138,6 +138,7 @@ executable in place is unreliable there. `kindle_KUAL/hellokindle/chess_app.sh` 
 
 See [`docs/ci-cd.md`](../../../docs/ci-cd.md) for the full release → download → install path.
 
-> **Known drift:** the git remote is `github.com:mxyyz/kindle-chess`, but `OWNER` is still
-> `yyyxam`. The GitHub API 301-redirects renamed owners and reqwest follows redirects, so
-> the updater still works — but this is a latent breakage worth fixing.
+> **Note for old binaries:** `OWNER` was `yyyxam` until 2026-08-24 (the GitHub account was
+> renamed to `mxyyz`). Anything already deployed still queries the old owner and relies on
+> GitHub's 301 redirect for renamed accounts — which reqwest follows, so those binaries can
+> still update themselves onto a build carrying the corrected constant.

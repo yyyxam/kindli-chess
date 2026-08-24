@@ -19,7 +19,7 @@ use serde::Deserialize;
 
 use crate::version;
 
-pub const OWNER: &str = "yyyxam";
+pub const OWNER: &str = "mxyyz";
 pub const REPO: &str = "kindle-chess";
 pub const ASSET_NAME: &str = "kindle-chess-armv7-musl";
 pub const SHA_NAME: &str = "kindle-chess-armv7-musl.sha256";

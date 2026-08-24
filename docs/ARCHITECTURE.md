@@ -50,8 +50,11 @@ are visible in the binary with `strings`.
 | `GIT_SHA` | `git rev-parse --short HEAD` | | |
 | `BUILD_TIMESTAMP` | `date -u +%Y-%m-%dT%H:%M:%SZ` | | |
 
-`build.rs` shells out to `git` and `date` rather than pulling in a build-dep crate, and
-re-runs on changes to `../.git/HEAD` and `../.git/index`.
+`build.rs` shells out to `git` and `date` rather than pulling in a build-dep crate. It
+re-runs on changes to `../.git/HEAD`, `../.git/index`, `.env.debug` and `.env.release` —
+the last two matter, because once a build script declares *any* `rerun-if-changed`, cargo
+watches only what is declared. Without them an edited `.env.*` is invisible to cargo and
+the old `ROOT_DIR` stays baked into the binary.
 
 ## Runtime architecture
 
@@ -158,8 +161,7 @@ Health check as of writing:
 `src/api/account.rs` (empty), `src/ui/lib.rs`, `src/ui/bin/test_ui.rs`,
 `src/ui/widgets/menu.rs` (empty), `src/examples/examples.rs`.
 `src/ui/lib.rs` and `bin/test_ui.rs` both reference a `kindle_x11_test` crate that no
-longer exists, and `flash_display.sh` still tries to deploy a `test_ui` binary that has no
-`[[bin]]` target — that script cannot work as written.
+longer exists. (`flash_display.sh`, which deployed that binary, was deleted in `916dd0f`.)
 
 **Functional gaps:**
 - `ChessAuthScreen` handles `AuthFailed` by logging only — no visible error, no retry.
@@ -171,8 +173,8 @@ longer exists, and `flash_display.sh` still tries to deploy a `test_ui` binary t
 - `authenticated_request`'s non-GET arms `.unwrap()` on transport errors.
 
 **Repo hygiene:**
-- `kindle_chess/Cargo.lock` is gitignored. For a binary crate this makes CI builds
-  non-reproducible — worth reconsidering.
+- `kindle_chess/Cargo.lock` is now tracked, so CI resolves the same dependency versions
+  you build against. (It was gitignored until 2026-08-24.)
 - `CLAUDE.md` is listed in `.gitignore`, so it does **not** travel with a clone. Anything
   that must survive a move to another machine belongs in `docs/` or a module README,
   not in `CLAUDE.md`.
@@ -193,11 +195,19 @@ longer exists, and `flash_display.sh` still tries to deploy a `test_ui` binary t
 7. For flashing: see [`kindle-usb-ssh.md`](kindle-usb-ssh.md).
 8. `CLAUDE.md` is not in the repo — copy it across by hand if you want it.
 
-> ⚠ **Live footgun on the current dev machine.** `.env.debug` reads
-> `ROOT_DIR=/home/mxy/Repos/kindle-chess/kindle_KUAL/hellokindle/` — capital `R` — but the
-> checkout is at `/home/mxy/repos/kindle-chess`. The path does not exist. log4rs silently
-> *creates* the missing tree, so the app starts and looks fine, but it logs into a phantom
-> directory and resolves `ASSETS_DIR` / `AUTH_TOKEN` there too — meaning no piece sprites,
-> no icons, and no cached token in debug builds. Fix the case before the first `run-dev.sh`
-> on any machine. (Verifying this created `/home/mxy/Repos/…/log/app.log` on the current
-> machine; that phantom tree can be deleted.)
+> ⚠ **A wrong `ROOT_DIR` fails silently — check it, don't assume it.** log4rs *creates*
+> the directory tree it is pointed at, so a bad `ROOT_DIR` still starts cleanly and prints
+> "Logger initialized successfully". What you get instead is an app logging into a phantom
+> directory, with `ASSETS_DIR` and `AUTH_TOKEN` resolving there too — no piece sprites, no
+> icons, no cached token. The symptom is a blank board, not an error.
+>
+> After editing `.env.debug`, confirm the value actually landed in the binary:
+>
+> ```sh
+> cd kindle_chess && cargo build
+> strings target/debug/kindle-hello | grep hellokindle/
+> ```
+>
+> (This bit the current dev machine: `.env.debug` said `/home/mxy/Repos/…` with a capital
+> `R` while the checkout was at `/home/mxy/repos/…`. Fixed 2026-08-24, along with the
+> missing `rerun-if-changed` in `build.rs` that made the correction a no-op.)

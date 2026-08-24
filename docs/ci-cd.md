@@ -41,17 +41,27 @@ merge its release PR.
 
 ### `rust.yml` — CI
 
-Triggers on push and PR to `main`. Installs `cross`, then
+Triggers on push and PR to `main`. Two independent jobs, run in parallel:
+
+**`test`** — `cargo test` from `kindle_chess/`, on the runner's **native** target. No
+`cross`, no emulation: everything under test (`models/bitboard.rs`, `models/puzzle.rs`) is
+pure logic with no X11, no network and no asset files, so the host target is sufficient and
+the job finishes in well under a minute. It is the fast-feedback half of CI.
+
+**`build`** — installs `cross`, then
 
 ```sh
 cd ./kindle_chess && RUSTFLAGS="-C target-feature=+crt-static" \
   cross build --target armv7-unknown-linux-musleabi --release
 ```
 
-That is all it does. **It does not run `cargo test`**, even though there are 9 passing unit
-tests in `models/bitboard.rs` and `models/puzzle.rs`. Both files are pure logic with no
-X11 and no network, so they would run fine on a GitHub runner — adding a
-`cargo test` step is close to free.
+This is the slow half (the `cargo install cross --git` alone dominates), and it proves the
+armv7-musl cross-build still works — the same command `release.yml` will run when a tag is
+pushed.
+
+Note that `build.rs` runs in the `test` job too, so `.env.debug` must exist and parse in
+CI. It is tracked, and its `ROOT_DIR` pointing at a path that does not exist on the runner
+is harmless: `build.rs` only reads the string, and none of the tests touch the filesystem.
 
 ### `release-please.yml` — versioning
 
@@ -120,7 +130,7 @@ Steps:
 These four constants in `src/api/github.rs` **must** match `release.yml`:
 
 ```rust
-pub const OWNER: &str      = "yyyxam";
+pub const OWNER: &str      = "mxyyz";
 pub const REPO:  &str      = "kindle-chess";
 pub const ASSET_NAME: &str = "kindle-chess-armv7-musl";
 pub const SHA_NAME:   &str = "kindle-chess-armv7-musl.sha256";
@@ -129,13 +139,13 @@ pub const SHA_NAME:   &str = "kindle-chess-armv7-musl.sha256";
 Rename an asset in the workflow and every already-deployed binary stops being able to
 update itself — the old binaries look for the old name. Treat these as frozen.
 
-> **Known drift, not currently breaking.** The git remote is
-> `github.com:mxyyz/kindle-chess`, but `OWNER` is still `yyyxam`.
+> **Historical note.** `OWNER` was `yyyxam` until 2026-08-24, from before the GitHub
+> account was renamed to `mxyyz`. It kept working only because
 > `api.github.com/repos/yyyxam/kindle-chess/releases/latest` returns **301** to the repo's
-> numeric ID, and reqwest follows redirects, so the updater works today. It stops working
-> the day someone else registers the `yyyxam` account. Worth correcting to `mxyyz` — but
-> note that binaries already on devices carry the old constant either way, so the redirect
-> has to keep working for them regardless.
+> numeric ID and reqwest follows redirects. **Binaries already on devices still carry
+> `yyyxam`**, so they depend on that redirect surviving — which it does as long as nobody
+> re-registers the `yyyxam` account. Anything flashed or self-updated after v0.1.2 uses the
+> correct owner directly.
 
 ## The app side
 
@@ -216,11 +226,8 @@ Re-running a build for an existing tag: Actions ▸ Release ▸ *Run workflow*, 
 
 ## Gaps worth closing
 
-- **No `cargo test` in CI.** 9 tests exist and are cheap to run.
-- **`Cargo.lock` is gitignored** (`kindle_chess/.gitignore`). For a binary crate this makes
-  every CI build resolve dependencies afresh — non-reproducible, and a transitive
-  regression would land silently.
-- **`OWNER` drift** — see above.
+- ~~**`Cargo.lock` is gitignored.**~~ Fixed 2026-08-24 — it is tracked now, so CI builds
+  against the same resolved versions you do.
 - **No release signing.** SHA256 protects against corruption, not tampering; the hash is
   fetched over the same channel as the binary. Fine for a personal project, worth knowing.
 - **`rust.yml` and `release.yml` both `cargo install cross` from git on every run** — slow,

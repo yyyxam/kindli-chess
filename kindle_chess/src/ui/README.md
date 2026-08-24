@@ -23,8 +23,10 @@ directory holds the `impl Screen for …` blocks and the widgets.
 | `lib.rs` | **dead** | Not declared in `mod.rs`; references a `kindle_x11_test` crate that no longer exists |
 | `bin/test_ui.rs` | **dead** | Not a `[[bin]]` target in `Cargo.toml`; also references `kindle_x11_test` |
 
-> `flash_display.sh` still tries to deploy a `test_ui` binary. That target does not exist
-> any more — the script cannot work as written.
+> `flash_display.sh` used to deploy a `test_ui` binary; it was deleted in `916dd0f` once
+> that target stopped existing. If you want on-device UI iteration back, re-add a
+> `[[bin]]` entry in `Cargo.toml` first — `lib.rs` and `bin/test_ui.rs` are both too stale
+> to compile as they stand.
 
 ## `renderer.rs`
 

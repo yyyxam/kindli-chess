@@ -160,8 +160,8 @@ Host kindle
 > `Hostname 169.254.7.190` in this block — a stale link-local address that is not on the
 > usbnet segment. Because `ssh_config` takes precedence over `/etc/hosts`, `ssh kindle`
 > resolves to the dead address while `scp root@192.168.15.244` (what `flash.sh` uses)
-> works. That is why `flash.sh` and `flash_display.sh` disagree about how to name the
-> device. Set it to `192.168.15.244` on `arch-pad` and the two agree again.
+> works. Set it to `192.168.15.244` on `arch-pad` so `ssh kindle` and `flash.sh` agree
+> about how to reach the device.
 
 ---
 
@@ -218,8 +218,8 @@ cargo install cross --git https://github.com/cross-rs/cross   # needs Docker or 
   tree. Note it hard-codes `/dev/sdb1` → `/mnt/tmp`; the block device will differ on
   `arch-pad`, so check `lsblk` first. (The path in `CLAUDE.md`,
   `/run/media/mxy/Kindle`, is out of date relative to the script.)
-- **`flash_display.sh`** — **broken.** It builds and deploys a `test_ui` binary that no
-  longer exists as a `[[bin]]` target. Ignore it or delete it.
+- **`flash_display.sh`** — deleted in `916dd0f`. It deployed a `test_ui` binary that no
+  longer exists as a `[[bin]]` target.
 
 The IP in `flash.sh` is hard-coded (`root@192.168.15.244`). If you fix `~/.ssh/config` as
 described above, changing it to `root@kindle` makes it machine-independent.
