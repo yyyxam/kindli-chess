@@ -10,12 +10,22 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
+  # Unit tests run natively on the runner, not under `cross`. Everything under
+  # test (models/bitboard.rs, models/puzzle.rs) is pure logic — no X11, no
+  # network, no assets — so the host target is enough and the job stays fast.
+  test:
+    runs-on: ubuntu-latest
 
+    steps:
+    - uses: actions/checkout@v4
+    - name: Test
+      working-directory: kindle_chess
+      run: cargo test --verbose
+
+  build:
     runs-on: ubuntu-latest
 
     steps:
     - uses: actions/checkout@v4
     - name: Build
       run: cd ./kindle_chess && cargo install cross --git https://github.com/cross-rs/cross && RUSTFLAGS="-C target-feature=+crt-static" cross build --target armv7-unknown-linux-musleabi --release
-

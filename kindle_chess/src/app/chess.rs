@@ -64,6 +64,17 @@ impl ChessApp {
         }
     }
 
+    /// The OAuth token backing this app, if any. Used to make authenticated
+    /// `/api/puzzle/next` requests; an offline backend has no token and the
+    /// puzzle screen then falls back to anonymous puzzle fetches.
+    pub fn token(&self) -> Option<TokenInfo> {
+        match &self.backend {
+            ChessBackend::OnlineIdle(api) => Some(api.token.clone()),
+            ChessBackend::OnlineInGame(api) => Some(api.token.clone()),
+            ChessBackend::Offline(_) => None,
+        }
+    }
+
     /// Apply the initial `GameFull` snapshot to the in-game state. No-op for
     /// non-in-game backends.
     pub fn apply_game_full(

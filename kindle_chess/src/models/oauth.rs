@@ -102,6 +102,10 @@ impl Default for AuthConfig {
                 "challenge:write".to_string(),
                 "bot:play".to_string(),
                 "board:play".to_string(),
+                // Lets /api/puzzle/next tailor puzzles to the user's rating.
+                // Tokens issued before this was added 403 on that path; the
+                // puzzle fetch falls back to an anonymous request in that case.
+                "puzzle:read".to_string(),
             ],
         }
     }

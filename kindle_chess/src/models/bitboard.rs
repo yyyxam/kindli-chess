@@ -129,6 +129,14 @@ impl Bitboards {
     /// `side_to_move` from the FEN (defaulting to White if absent) so that
     /// `apply_uci_moves` knows whose pawn is moving on the first ply.
     pub fn from_fen(fen: &str) -> Result<Self, String> {
+        // Lichess streams the literal "startpos" for games that begin from the
+        // standard initial position; treat it as such instead of falling
+        // through to the rank-count error. (Variant and from-position games
+        // always carry a real FEN, so they parse normally below.)
+        if fen.trim() == "startpos" {
+            return Ok(Self::starting_position());
+        }
+
         let mut parts = fen.split_whitespace();
         let position = parts.next().ok_or_else(|| "empty FEN".to_string())?;
         let side = parts.next().unwrap_or("w");

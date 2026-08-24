@@ -48,6 +48,14 @@ fn get_env_variables() -> () {
         _ => ".env.debug",
     };
 
+    // Without these, cargo watches only the triggers declared in
+    // `emit_build_metadata` and never notices an edited .env file — the stale
+    // ROOT_DIR stays baked into the binary until something else forces the
+    // build script to re-run. Both files are declared so switching profiles
+    // is covered too.
+    println!("cargo:rerun-if-changed=.env.debug");
+    println!("cargo:rerun-if-changed=.env.release");
+
     from_filename(env_file).expect(&format!("Failed to load {}", env_file));
 
     let root_dir = env::var("ROOT_DIR").expect("ROOT_DIR must be set");
